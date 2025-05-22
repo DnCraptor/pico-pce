@@ -2,6 +2,7 @@
 #include <cstring>
 #include <hardware/flash.h>
 #include <hardware/vreg.h>
+#include <hardware/watchdog.h>
 #include <pico/multicore.h>
 #include <pico/stdlib.h>
 
@@ -51,8 +52,37 @@ struct input_bits_t {
 static input_bits_t keyboard_bits = { false, false, false, false, false, false, false, false };
 static input_bits_t gamepad1_bits = { false, false, false, false, false, false, false, false };
 static input_bits_t gamepad2_bits = { false, false, false, false, false, false, false, false };
-
+static uint8_t fxPressedV = 0;
 static bool swap_ab = false;
+
+static void load_config() {
+    char pathname[256];
+    sprintf(pathname, "%s\\pico-pce.cfg", HOME_DIR);
+    FIL fd;
+    FRESULT fr = f_open(&fd, pathname, FA_READ);
+    if (fr != FR_OK) {
+        return;
+    }
+    UINT br;
+    f_read(&fd, &swap_ab, sizeof(swap_ab), &br);
+#if SOFTTV
+    f_read(&fd, &tv_out_mode, sizeof(tv_out_mode), &br);
+#endif
+    f_close(&fd);
+}
+
+static void save_config() {
+    char pathname[256];
+    sprintf(pathname, "%s\\pico-pce.cfg", HOME_DIR);
+    FIL fd;
+    FRESULT fr = f_open(&fd, pathname, FA_CREATE_ALWAYS | FA_WRITE);
+    UINT bw;
+    f_write(&fd, &swap_ab, sizeof(swap_ab), &bw);
+#if SOFTTV
+    f_write(&fd, &tv_out_mode, sizeof(tv_out_mode), &bw);
+#endif
+    f_close(&fd);
+}
 
 static void nespad_tick() {
     nespad_read();
@@ -102,25 +132,55 @@ __not_in_flash_func(process_kbd_report)(hid_keyboard_report_t const* report, hid
         printf("%2.2X", i);
     printf("\r\n");
      */
-    keyboard_bits.start = isInReport(report, HID_KEY_ENTER);
-    keyboard_bits.select = isInReport(report, HID_KEY_BACKSPACE) || isInReport(report, HID_KEY_ESCAPE);
+    keyboard_bits.start = isInReport(report, HID_KEY_ENTER) || isInReport(report, HID_KEY_KEYPAD_ENTER);
+    keyboard_bits.select = isInReport(report, HID_KEY_BACKSPACE) || isInReport(report, HID_KEY_ESCAPE) || isInReport(report, HID_KEY_KEYPAD_ADD);
 
-    keyboard_bits.a = isInReport(report, HID_KEY_Z) || isInReport(report, HID_KEY_O);
-    keyboard_bits.b = isInReport(report, HID_KEY_X) || isInReport(report, HID_KEY_P);
+    if (swap_ab) {
+        keyboard_bits.b = isInReport(report, HID_KEY_Z) || isInReport(report, HID_KEY_O) || isInReport(report, HID_KEY_K) || isInReport(report, HID_KEY_KEYPAD_0);
+        keyboard_bits.a = isInReport(report, HID_KEY_X) || isInReport(report, HID_KEY_P) || isInReport(report, HID_KEY_L) || isInReport(report, HID_KEY_KEYPAD_DECIMAL);
+    } else {
+        keyboard_bits.a = isInReport(report, HID_KEY_Z) || isInReport(report, HID_KEY_O) || isInReport(report, HID_KEY_K) || isInReport(report, HID_KEY_KEYPAD_0);
+        keyboard_bits.b = isInReport(report, HID_KEY_X) || isInReport(report, HID_KEY_P) || isInReport(report, HID_KEY_L) || isInReport(report, HID_KEY_KEYPAD_DECIMAL);
+    }
 
-    keyboard_bits.up = isInReport(report, HID_KEY_ARROW_UP) || isInReport(report, HID_KEY_W);
-    keyboard_bits.down = isInReport(report, HID_KEY_ARROW_DOWN) || isInReport(report, HID_KEY_S);
-    keyboard_bits.left = isInReport(report, HID_KEY_ARROW_LEFT) || isInReport(report, HID_KEY_A);
-    keyboard_bits.right = isInReport(report, HID_KEY_ARROW_RIGHT)  || isInReport(report, HID_KEY_D);
-    //-------------------------------------------------------------------------
+
+    bool b7 = isInReport(report, HID_KEY_KEYPAD_7);
+    bool b9 = isInReport(report, HID_KEY_KEYPAD_9);
+    bool b1 = isInReport(report, HID_KEY_KEYPAD_1);
+    bool b3 = isInReport(report, HID_KEY_KEYPAD_3);
+
+    keyboard_bits.up = b7 || b9 || isInReport(report, HID_KEY_ARROW_UP) || isInReport(report, HID_KEY_W) || isInReport(report, HID_KEY_KEYPAD_8);
+    keyboard_bits.down = b1 || b3 || isInReport(report, HID_KEY_ARROW_DOWN) || isInReport(report, HID_KEY_S) || isInReport(report, HID_KEY_KEYPAD_5) || isInReport(report, HID_KEY_KEYPAD_2);
+    keyboard_bits.left = b7 || b1 || isInReport(report, HID_KEY_ARROW_LEFT) || isInReport(report, HID_KEY_A) || isInReport(report, HID_KEY_KEYPAD_4);
+    keyboard_bits.right = b9 || b3 || isInReport(report, HID_KEY_ARROW_RIGHT)  || isInReport(report, HID_KEY_D) || isInReport(report, HID_KEY_KEYPAD_6);
+    
+    bool altPressed = isInReport(report, HID_KEY_ALT_LEFT) || isInReport(report, HID_KEY_ALT_RIGHT);
+    bool ctrlPressed = isInReport(report, HID_KEY_CONTROL_LEFT) || isInReport(report, HID_KEY_CONTROL_RIGHT);
+    if (altPressed && ctrlPressed && isInReport(report, HID_KEY_DELETE)) {
+        watchdog_enable(10, true);
+        while(true) {
+            tight_loop_contents();
+        }
+    }    
+    if (ctrlPressed || altPressed) {
+        uint8_t fxPressed = 0;
+        if (isInReport(report, HID_KEY_F1)) fxPressed = 1;
+        else if (isInReport(report, HID_KEY_F2)) fxPressed = 2;
+        else if (isInReport(report, HID_KEY_F3)) fxPressed = 3;
+        else if (isInReport(report, HID_KEY_F4)) fxPressed = 4;
+        else if (isInReport(report, HID_KEY_F5)) fxPressed = 5;
+        else if (isInReport(report, HID_KEY_F6)) fxPressed = 6;
+        else if (isInReport(report, HID_KEY_F7)) fxPressed = 7;
+        else if (isInReport(report, HID_KEY_F8)) fxPressed = 8;
+        fxPressedV = fxPressed;
+    }
 }
 
 Ps2Kbd_Mrmltr ps2kbd(
         pio1,
         0,
-        process_kbd_report);
-
-
+        process_kbd_report
+);
 
 i2s_config_t i2s_config;
 
@@ -185,10 +245,8 @@ bool filebrowser_loadfile(const char pathname[256]) {
         return false;
     }
 
-
     draw_text("Loading...", window_x + 1, window_y + 2, 10, 1);
     sleep_ms(500);
-
 
     multicore_lockout_start_blocking();
     auto flash_target_offset = FLASH_TARGET_OFFSET;
@@ -233,11 +291,6 @@ void filebrowser(const char pathname[256], const char executables[11]) {
 
     DIR dir;
     FILINFO fileInfo;
-
-    if (FR_OK != f_mount(&fs, "SD", 1)) {
-        draw_text("SD Card not inserted or SD Card error!", 0, 0, 12, 0);
-        while (true);
-    }
 
     while (true) {
         memset(fileItems, 0, sizeof(file_item_t) * max_files);
@@ -465,7 +518,6 @@ bool save() {
         sprintf(pathname, "%s\\%s.save", HOME_DIR, filename);
     }
 
-    FRESULT fr = f_mount(&fs, "", 1);
 //    FIL fd;
 //    fr = f_open(&fd, pathname, FA_CREATE_ALWAYS | FA_WRITE);
 //    UINT bytes_writen;
@@ -487,8 +539,6 @@ bool load() {
     } else {
         sprintf(pathname, "%s\\%s.save", HOME_DIR, filename);
     }
-
-    FRESULT fr = f_mount(&fs, "", 1);
 
 //    FIL fd;
 //    fr = f_open(&fd, pathname, FA_READ);
@@ -642,6 +692,7 @@ void menu() {
 
         sleep_ms(125);
     }
+    save_config();
     graphics_set_mode(GRAPHICSMODE_DEFAULT);
 }
 
@@ -725,6 +776,14 @@ int main() {
         sleep_ms(33);
         gpio_put(PICO_DEFAULT_LED_PIN, false);
     }
+
+    if (FR_OK != f_mount(&fs, "SD", 1)) {
+        draw_text("SD Card not inserted or SD Card error!", 0, 0, 12, 0);
+        while (true);
+    }
+    f_mkdir(HOME_DIR);
+    load_config();
+
     while (true) {
         graphics_set_mode(TEXTMODE_DEFAULT);
         filebrowser(HOME_DIR, "pce");
@@ -750,16 +809,14 @@ int main() {
 
             pce_run();
 
-                graphics_set_buffer((uint8_t*)SCREEN, PCE.VDC.screen_width == 256 ? 256 : 320, PCE.VDC.screen_height);
-                graphics_set_offset(PCE.VDC.screen_width == 256 ? 32 : 0,0);
+            graphics_set_buffer((uint8_t*)SCREEN, PCE.VDC.screen_width == 256 ? 256 : 320, PCE.VDC.screen_height);
+            graphics_set_offset(PCE.VDC.screen_width == 256 ? 32 : 0,0);
 
             psg_update((int16_t *) audio_buffer, AUDIO_BUFFER_LENGTH, 0xff);
             i2s_dma_write(&i2s_config, (const int16_t *) audio_buffer);
 
-
             frame++;
             if (0) {
-
                 if (++frame_cnt == 6) {
                     while (time_us_64() - frame_timer_start < 16666 * 6);  // 60 Hz
                     frame_timer_start = time_us_64();
