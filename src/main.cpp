@@ -11,7 +11,6 @@ extern "C" {
 #include <pce-go/psg.h>
 }
 
-
 #include <graphics.h>
 #include "audio.h"
 
@@ -26,7 +25,6 @@ static const uintptr_t rom = XIP_BASE + FLASH_TARGET_OFFSET;
 
 #define AUDIO_SAMPLE_RATE 22050
 #define AUDIO_BUFFER_LENGTH (AUDIO_SAMPLE_RATE / 60 + 1)
-
 
 char __uninitialized_ram(filename[256]);
 static uint32_t __uninitialized_ram(rom_size);
@@ -54,6 +52,8 @@ static input_bits_t gamepad1_bits = { false, false, false, false, false, false, 
 static input_bits_t gamepad2_bits = { false, false, false, false, false, false, false, false };
 static uint8_t fxPressedV = 0;
 static bool swap_ab = false;
+static bool ctrlPressed = false;
+static bool altPressed = false;
 
 static void load_config() {
     char pathname[256];
@@ -154,8 +154,8 @@ __not_in_flash_func(process_kbd_report)(hid_keyboard_report_t const* report, hid
     keyboard_bits.left = b7 || b1 || isInReport(report, HID_KEY_ARROW_LEFT) || isInReport(report, HID_KEY_A) || isInReport(report, HID_KEY_KEYPAD_4);
     keyboard_bits.right = b9 || b3 || isInReport(report, HID_KEY_ARROW_RIGHT)  || isInReport(report, HID_KEY_D) || isInReport(report, HID_KEY_KEYPAD_6);
     
-    bool altPressed = isInReport(report, HID_KEY_ALT_LEFT) || isInReport(report, HID_KEY_ALT_RIGHT);
-    bool ctrlPressed = isInReport(report, HID_KEY_CONTROL_LEFT) || isInReport(report, HID_KEY_CONTROL_RIGHT);
+    altPressed = isInReport(report, HID_KEY_ALT_LEFT) || isInReport(report, HID_KEY_ALT_RIGHT);
+    ctrlPressed = isInReport(report, HID_KEY_CONTROL_LEFT) || isInReport(report, HID_KEY_CONTROL_RIGHT);
     if (altPressed && ctrlPressed && isInReport(report, HID_KEY_DELETE)) {
         watchdog_enable(10, true);
         while(true) {
@@ -509,46 +509,22 @@ bool overclock() {
 
 bool save() {
     char pathname[255];
-//    const size_t size = supervision_save_state_buf_size();
-//    uint8_t data[size];
-
     if (save_slot) {
         sprintf(pathname, "%s\\%s_%d.save", HOME_DIR, filename, save_slot);
     } else {
         sprintf(pathname, "%s\\%s.save", HOME_DIR, filename);
     }
-
-//    FIL fd;
-//    fr = f_open(&fd, pathname, FA_CREATE_ALWAYS | FA_WRITE);
-//    UINT bytes_writen;
-
-//    supervision_save_state_buf((uint8*)data, (uint32)size);
-//    f_write(&fd, data, size, &bytes_writen);
-//    f_close(&fd);
     SaveState(pathname);
     return true;
 }
 
 bool load() {
     char pathname[255];
-//    const size_t size = supervision_save_state_buf_size();
-//    auto * data = (uint8_t *)(malloc(size));
-
     if (save_slot) {
         sprintf(pathname, "%s\\%s_%d.save", HOME_DIR, filename, save_slot);
     } else {
         sprintf(pathname, "%s\\%s.save", HOME_DIR, filename);
     }
-
-//    FIL fd;
-//    fr = f_open(&fd, pathname, FA_READ);
-//    UINT bytes_read;
-
-//    f_read(&fd, data, size, &bytes_read);
-//    supervision_load_state_buf((uint8*)data, (uint32)size);
-//    f_close(&fd);
-
-//    free(data);
     return LoadState(pathname) > -1;
 }
 #if SOFTTV
@@ -822,6 +798,16 @@ int main() {
                     frame_timer_start = time_us_64();
                     frame_cnt = 0;
                 }
+            }
+            if (fxPressedV) {
+                save_slot = fxPressedV;
+                if (ctrlPressed) {
+                    load();
+                }
+                if (altPressed) {
+                    save();
+                }
+                fxPressedV = 0;
             }
 
             tight_loop_contents();

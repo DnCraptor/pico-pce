@@ -81,8 +81,9 @@ set(BOARD pico_sdk)
 pico_set_program_name(pce "PC Engine emulator by xrip for MURMULATOR devboard")
 pico_set_program_version(pce "develop")
 
-#include_directories()
 include_directories(${PROJECT_NAME} PRIVATE src)
+
+SET(BUILD_NAME "m1p1-${BUILD_NAME}")
 
 IF(TFT)
 	target_link_libraries(${PROJECT_NAME} PRIVATE st7789)
@@ -107,7 +108,6 @@ ELSEIF(SOFTTV)
 	target_link_libraries(${PROJECT_NAME} PRIVATE tv-software)
 	SET(BUILD_NAME "${BUILD_NAME}-TV-SOFT")
 ELSE()
-
 	target_compile_definitions(${PROJECT_NAME} PRIVATE VGA)
 	target_link_libraries(${PROJECT_NAME} PRIVATE vga-nextgen)
 	SET(BUILD_NAME "${BUILD_NAME}-VGA")
@@ -115,6 +115,7 @@ ENDIF()
 
 IF(NOT I2S)
 	target_compile_definitions(${PROJECT_NAME} PRIVATE AUDIO_PWM)
+	SET(BUILD_NAME "${BUILD_NAME}-PWM")
 ELSEIF(I2S_CS4334)
 	target_compile_definitions(${PROJECT_NAME} PRIVATE I2S_CS4334)
 	SET(BUILD_NAME "${BUILD_NAME}-I2S-CS4334")
