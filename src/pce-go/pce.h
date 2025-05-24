@@ -134,7 +134,8 @@ typedef struct {
 	uint8_t ExRAM[0x8000];
 
 	// ROM memory
-	uint8_t *ROM, *ROM_DATA;
+	const uint8_t *ROM;
+	uint8_t *ROM_DATA;
 
 	// ROM size in 0x2000 blocks
 	uint16_t ROM_SIZE;

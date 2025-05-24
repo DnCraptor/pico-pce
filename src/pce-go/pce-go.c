@@ -135,7 +135,7 @@ int LoadCard(const char *ROM, size_t fsize) {
 	fclose(fp);
 */
     PCE.ROM_SIZE = (fsize - offset) / 0x2000;
-    PCE.ROM_DATA = PCE.ROM + offset;
+    PCE.ROM_DATA = (uint8_t*)PCE.ROM + offset;
     PCE.ROM_CRC = crc32_le(0, PCE.ROM, fsize);
 
     uint32_t IDX = 0;
