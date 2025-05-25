@@ -801,10 +801,10 @@ int main() {
             }
             if (fxPressedV) {
                 save_slot = fxPressedV;
-                if (ctrlPressed) {
+                if (altPressed) {
                     load();
                 }
-                if (altPressed) {
+                if (ctrlPressed) {
                     save();
                 }
                 fxPressedV = 0;
