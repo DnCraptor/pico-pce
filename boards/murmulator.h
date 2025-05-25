@@ -6,6 +6,8 @@
 #include "boards/pico.h"
 #endif
 
+#define CPU_FREQ 378
+
 // SDCARD
 #define SDCARD_PIN_SPI0_CS 5
 #define SDCARD_PIN_SPI0_SCK 2
