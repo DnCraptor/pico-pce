@@ -760,8 +760,7 @@ void __time_critical_func(render_core)() {
 
     graphics_set_offset(32,0);
 
-    /* slot 255 is the border/background colour (graphics_set_bgcolor above);
-     * the HDMI driver also shows frame pixels 0xF0..0xFF through it */
+    /* slot 255 is the border/background colour (graphics_set_bgcolor above) */
     for (int i = 0; i < 255; i++) {
         graphics_set_palette(i, pce_color(i));
     }
