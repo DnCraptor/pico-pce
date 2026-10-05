@@ -58,6 +58,43 @@ static bool swap_ab = false;
 static bool ctrlPressed = false;
 static bool altPressed = false;
 
+/* PCE frame pixels are 8-bit GGGRRRBB indices into the whole palette. The
+ * HDMI text mode draws its 16 colours through palette slots 200..215
+ * (textmode_palette in drivers/hdmi/hdmi.h), which the PCE palette also
+ * owns: without swapping them the text colours come out as PCE colours
+ * (blue 201 -> green). Load CGA colours there for text mode and put the
+ * PCE colours back for graphics mode. */
+static uint32_t pce_color(const int i) {
+    return RGB888((((i & 0x1C) >> 1) * 16),
+                  (((i & 0xe0) >> 4) * 16),
+                  (((i & 0x03) << 2) * 16));
+}
+
+#ifdef HDMI
+static const uint32_t text_colors[16] = {
+    0x000000, 0x0000AA, 0x00AA00, 0x00AAAA, 0xAA0000, 0xAA00AA, 0xAA5500, 0xAAAAAA,
+    0x555555, 0x5555FF, 0x55FF55, 0x55FFFF, 0xFF5555, 0xFF55FF, 0xFFFF55, 0xFFFFFF,
+};
+
+static void set_text_colors() {
+    for (int i = 0; i < 16; i++)
+        graphics_set_palette(textmode_palette[i], text_colors[i]);
+}
+
+static void set_game_colors() {
+    for (int i = 0; i < 16; i++)
+        graphics_set_palette(textmode_palette[i], pce_color(textmode_palette[i]));
+}
+#endif
+
+static void set_mode(const enum graphics_mode_t mode) {
+#ifdef HDMI
+    if (mode == GRAPHICSMODE_DEFAULT) set_game_colors();
+    else set_text_colors();
+#endif
+    graphics_set_mode(mode);
+}
+
 static void load_config() {
     char pathname[256];
     sprintf(pathname, "%s\\pico-pce.cfg", HOME_DIR);
@@ -607,7 +644,7 @@ const MenuItem menu_items[] = {
 
 void menu() {
     bool exit = false;
-    graphics_set_mode(TEXTMODE_DEFAULT);
+    set_mode(TEXTMODE_DEFAULT);
     char footer[TEXTMODE_COLS];
     snprintf(footer, TEXTMODE_COLS, ":: %s ::", PICO_PROGRAM_NAME);
     draw_text(footer, TEXTMODE_COLS / 2 - strlen(footer) / 2, 0, 11, 1);
@@ -695,7 +732,7 @@ void menu() {
         sleep_ms(125);
     }
     save_config();
-    graphics_set_mode(GRAPHICSMODE_DEFAULT);
+    set_mode(GRAPHICSMODE_DEFAULT);
 }
 
 /* Renderer loop on Pico's second core */
@@ -723,14 +760,14 @@ void __time_critical_func(render_core)() {
 
     graphics_set_offset(32,0);
 
-    for (int i = 0; i < 256; i++) {
-        graphics_set_palette(i, RGB888(
-                                     (((i & 0x1C) >> 1) * 16),
-                                     (((i & 0xe0) >> 4) * 16),
-                                     (((i & 0x03) << 2) * 16)
-                             )
-        );
+    /* slot 255 is the border/background colour (graphics_set_bgcolor above);
+     * the HDMI driver also shows frame pixels 0xF0..0xFF through it */
+    for (int i = 0; i < 255; i++) {
+        graphics_set_palette(i, pce_color(i));
     }
+#ifdef HDMI
+    set_text_colors(); // the ROM browser comes first
+#endif
 
     graphics_set_flashmode(true, true);
     sem_acquire_blocking(&vga_start_semaphore);
@@ -791,10 +828,10 @@ int main() {
     load_config();
 
     while (true) {
-        graphics_set_mode(TEXTMODE_DEFAULT);
+        set_mode(TEXTMODE_DEFAULT);
         filebrowser(HOME_DIR, "pce");
         InitPCE(AUDIO_SAMPLE_RATE, true, (uint8_t *) rom, rom_size);
-        graphics_set_mode(GRAPHICSMODE_DEFAULT);
+        set_mode(GRAPHICSMODE_DEFAULT);
 
         frame = 0;
         while (!reboot) {
