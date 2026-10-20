@@ -114,6 +114,8 @@ extern "C" void __no_inline_not_in_flash_func(pce_safe_reset)(void) {
 static FATFS fs;
 bool reboot = false;
 semaphore vga_start_semaphore;
+// set by the render core once text/graphics buffers are attached to the video driver
+static volatile bool render_ready = false;
 
 alignas(4) uint8_t SCREEN[XBUF_HEIGHT][XBUF_WIDTH];
 alignas(4) int audio_buffer[AUDIO_BUFFER_LENGTH];
@@ -153,10 +155,19 @@ static uint32_t pce_color(const int i) {
                   (((i & 0x03) << 2) * 16));
 }
 
-#ifdef HDMI
+#if defined(HDMI) || SOFTTV
+/* The TV-SOFT text mode uses the same slots 200..215 (tv-software.h).  Its
+ * colours are those of pico-nes (set by the TV driver at init, then lost here
+ * under the PCE palette): the menu is shown monochrome, and with the PCE
+ * colours the blue background (GGGRRRBB 201) became a bright grey there. */
 static const uint32_t text_colors[16] = {
+#if SOFTTV
+    0x000000, 0x0000C4, 0x00C400, 0x00C4C4, 0xC40000, 0xC400C4, 0xC47E00, 0xC4C4C4,
+    0x4E4E4E, 0x4E4EDC, 0x4EDC4E, 0x4EF3F3, 0xDC4E4E, 0xF34EF3, 0xF3F34E, 0xFFFFFF,
+#else
     0x000000, 0x0000AA, 0x00AA00, 0x00AAAA, 0xAA0000, 0xAA00AA, 0xAA5500, 0xAAAAAA,
     0x555555, 0x5555FF, 0x55FF55, 0x55FFFF, 0xFF5555, 0xFF55FF, 0xFFFF55, 0xFFFFFF,
+#endif
 };
 
 static void set_text_colors() {
@@ -171,12 +182,35 @@ static void set_game_colors() {
 #endif
 
 static void set_mode(const enum graphics_mode_t mode) {
-#ifdef HDMI
+#if defined(HDMI) || SOFTTV
     if (mode == GRAPHICSMODE_DEFAULT) set_game_colors();
     else set_text_colors();
 #endif
     graphics_set_mode(mode);
+    /* SCREEN is shared with the text mode and the file list, and not every
+     * game redraws every line (the last one, the area below a short picture):
+     * start the picture from black (PCE colour 0) rather than from leftovers.
+     * After graphics_set_mode(): the drivers clear the buffer their own way. */
+    if (mode == GRAPHICSMODE_DEFAULT)
+        memset(SCREEN, 0, sizeof SCREEN);
 }
+
+#if SOFTTV
+/* TV-SOFT: a TV standard is a coherent set (lines, colour subcarrier,
+ * sync), so the menu only selects the system; the game is always in colour. */
+static uint8_t tv_system = 0; // 0 - PAL, 1 - NTSC
+
+/* pico-pce.cfg of older builds kept the whole driver state after swap_ab */
+typedef struct {
+    float color_index;
+    COLOR_FREQ_t c_freq;
+    enum graphics_mode_t mode_bpp;
+    g_out_TV_t tv_system;
+    NUM_TV_LINES_t N_lines;
+    bool cb_sync_PI_shift_lines;
+    bool cb_sync_PI_shift_half_frame;
+} legacy_tv_config_t;
+#endif
 
 static void load_config() {
     char pathname[256];
@@ -189,7 +223,15 @@ static void load_config() {
     UINT br;
     f_read(&fd, &swap_ab, sizeof(swap_ab), &br);
 #if SOFTTV
-    f_read(&fd, &tv_out_mode, sizeof(tv_out_mode), &br);
+    if (f_size(&fd) == sizeof(swap_ab) + sizeof(legacy_tv_config_t)) {
+        legacy_tv_config_t legacy;
+        if (FR_OK == f_read(&fd, &legacy, sizeof legacy, &br) && br == sizeof legacy) {
+            tv_system = legacy.tv_system == g_TV_OUT_PAL ? 0 : 1;
+        }
+    } else {
+        f_read(&fd, &tv_system, sizeof(tv_system), &br);
+    }
+    if (tv_system > 1) tv_system = 0;
 #endif
     f_close(&fd);
 }
@@ -202,7 +244,7 @@ static void save_config() {
     UINT bw;
     f_write(&fd, &swap_ab, sizeof(swap_ab), &bw);
 #if SOFTTV
-    f_write(&fd, &tv_out_mode, sizeof(tv_out_mode), &bw);
+    f_write(&fd, &tv_system, sizeof(tv_system), &bw);
 #endif
     f_close(&fd);
 }
@@ -356,7 +398,14 @@ typedef struct __attribute__((__packed__)) {
 } file_item_t;
 
 constexpr int max_files = 600;
-file_item_t *fileItems = (file_item_t *) (&SCREEN[0][0] + TEXTMODE_COLS * TEXTMODE_ROWS * 2);
+/* text buffer first, then the file list: TV-SOFT changes the number of text
+ * columns at run time, so keep the list past the largest text buffer */
+#ifdef TEXTMODE_COLS_MAX
+#define TEXT_BUFFER_COLS TEXTMODE_COLS_MAX
+#else
+#define TEXT_BUFFER_COLS TEXTMODE_COLS
+#endif
+file_item_t *fileItems = (file_item_t *) (&SCREEN[0][0] + TEXT_BUFFER_COLS * TEXTMODE_ROWS * 2);
 
 int compareFileItems(const void *a, const void *b) {
     const auto *itemA = (file_item_t *) a;
@@ -429,8 +478,9 @@ bool filebrowser_loadfile(const char pathname[256]) {
     FIL file;
     FILINFO fileinfo;
 
-    constexpr int window_y = (TEXTMODE_ROWS - 5) / 2;
-    constexpr int window_x = (TEXTMODE_COLS - 43) / 2;
+    const int window_w = (int) TEXTMODE_COLS < 43 ? (int) TEXTMODE_COLS : 43; // TV NTSC has only 40 columns
+    const int window_y = (TEXTMODE_ROWS - 5) / 2;
+    const int window_x = ((int) TEXTMODE_COLS - window_w) / 2;
 
     auto fail = [&](const char *message) {
         draw_text(message, window_x + 1, window_y + 2, 13, 1);
@@ -438,7 +488,7 @@ bool filebrowser_loadfile(const char pathname[256]) {
         return false;
     };
 
-    draw_window("Loading ROM", window_x, window_y, 43, 5);
+    draw_window("Loading ROM", window_x, window_y, window_w, 5);
 
     if (FR_OK != f_stat(pathname, &fileinfo) || fileinfo.fsize == 0)
         return fail("ERROR: Can't read the ROM file!   ");
@@ -474,7 +524,7 @@ bool filebrowser_loadfile(const char pathname[256]) {
         /* the sector buffer lives in the unused tail of SCREEN (text mode +
          * file list take its beginning): RP2040 has no 4 KB of RAM to spare */
         uint8_t *const buffer = &SCREEN[0][0] + sizeof(SCREEN) - FLASH_SECTOR_SIZE;
-        static_assert(TEXTMODE_COLS * TEXTMODE_ROWS * 2 + max_files * sizeof(file_item_t) +
+        static_assert(TEXT_BUFFER_COLS * TEXTMODE_ROWS * 2 + max_files * sizeof(file_item_t) +
                       FLASH_SECTOR_SIZE <= sizeof(SCREEN), "no room for the flash sector buffer");
         static_assert(sizeof(SCREEN) % 4 == 0, "flash sector buffer must stay word aligned");
         uint32_t target = FLASH_TARGET_OFFSET;
@@ -870,31 +920,6 @@ bool load() {
     }
     return LoadState(pathname) > -1;
 }
-#if SOFTTV
-typedef struct tv_out_mode_t {
-    // double color_freq;
-    float color_index;
-    COLOR_FREQ_t c_freq;
-    enum graphics_mode_t mode_bpp;
-    g_out_TV_t tv_system;
-    NUM_TV_LINES_t N_lines;
-    bool cb_sync_PI_shift_lines;
-    bool cb_sync_PI_shift_half_frame;
-} tv_out_mode_t;
-extern tv_out_mode_t tv_out_mode;
-
-bool color_mode=true;
-bool toggle_color() {
-    color_mode=!color_mode;
-    if(color_mode) {
-        tv_out_mode.color_index= 1.0f;
-    } else {
-        tv_out_mode.color_index= 0.0f;
-    }
-
-    return true;
-}
-#endif
 
 const MenuItem menu_items[] = {
         { "Swap AB <> BA: %s", ARRAY, &swap_ab, nullptr, 1, { "NO ", "YES" }},
@@ -905,12 +930,8 @@ const MenuItem menu_items[] = {
         { "Load state: %i", INT, &save_slot, &load, 5 },
         {},
 #if SOFTTV
-        { "TV system %s", ARRAY, &tv_out_mode.tv_system, nullptr, 1, { "PAL ", "NTSC" } },
-        { "TV Lines %s", ARRAY, &tv_out_mode.N_lines, nullptr, 3, { "624", "625", "524", "525" } },
-        { "Freq %s", ARRAY, &tv_out_mode.c_freq, nullptr, 1, { "3.579545", "4.433619" } },
-        { "Colors: %s", ARRAY, &color_mode, &toggle_color, 1, { "NO ", "YES" } },
-        { "Shift lines %s", ARRAY, &tv_out_mode.cb_sync_PI_shift_lines, nullptr, 1, { "NO ", "YES" } },
-        { "Shift half frame %s", ARRAY, &tv_out_mode.cb_sync_PI_shift_half_frame, nullptr, 1, { "NO ", "YES" } },
+        { "TV system %s", ARRAY, &tv_system, nullptr, 1, { "PAL ", "NTSC" } },
+        {},
 #endif
         {
                 "Overclocking: %s MHz", ARRAY, &frequency_index, &overclock, count_of(frequencies) - 1,
@@ -985,7 +1006,7 @@ void menu() {
                     exit = item->callback();
                 }
             }
-            static char result[TEXTMODE_COLS];
+            static char result[TEXT_BUFFER_COLS];
             switch (item->type) {
                 case INT:
                     snprintf(result, TEXTMODE_COLS, item->text, *(uint8_t *) item->value);
@@ -1020,6 +1041,9 @@ void menu() {
         sleep_ms(25);
     }
     save_config();
+#if SOFTTV
+    graphics_set_tv(tv_system == 0, true); // applied by set_mode()
+#endif
     set_mode(GRAPHICSMODE_DEFAULT);
 }
 
@@ -1046,17 +1070,22 @@ void __time_critical_func(render_core)() {
     graphics_set_textbuffer(buffer);
     graphics_set_bgcolor(0x000000);
 
+#if SOFTTV
+    graphics_set_offset(0, 0); // the TV driver centres the picture itself, with the real PCE pixel width
+#else
     graphics_set_offset(32,0);
+#endif
 
     /* slot 255 is the border/background colour (graphics_set_bgcolor above) */
     for (int i = 0; i < 255; i++) {
         graphics_set_palette(i, pce_color(i));
     }
-#ifdef HDMI
+#if defined(HDMI) || SOFTTV
     set_text_colors(); // the ROM browser comes first
 #endif
 
     graphics_set_flashmode(true, true);
+    render_ready = true;
     sem_acquire_blocking(&vga_start_semaphore);
 
     // 60 FPS loop
@@ -1099,6 +1128,9 @@ int main() {
     sem_init(&vga_start_semaphore, 0, 1);
     multicore_launch_core1(render_core);
     sem_release(&vga_start_semaphore);
+    // Do not draw before the video driver has its text buffer:
+    // draw_text() into a NULL text_buffer is lost.
+    while (!render_ready) tight_loop_contents();
 
     gpio_init(PICO_DEFAULT_LED_PIN);
     gpio_set_dir(PICO_DEFAULT_LED_PIN, GPIO_OUT);
@@ -1116,6 +1148,9 @@ int main() {
     }
     f_mkdir(HOME_DIR);
     load_config();
+#if SOFTTV
+    graphics_set_tv(tv_system == 0, true); // applied by the next set_mode()
+#endif
 
     while (true) {
         set_mode(TEXTMODE_DEFAULT);
@@ -1151,7 +1186,11 @@ int main() {
             pce_run();
 
             graphics_set_buffer((uint8_t*)SCREEN, PCE.VDC.screen_width == 256 ? 256 : 320, PCE.VDC.screen_height);
+#if SOFTTV
+            graphics_set_offset(0, 0);
+#else
             graphics_set_offset(PCE.VDC.screen_width == 256 ? 32 : 0,0);
+#endif
 
             psg_update((int16_t *) audio_buffer, AUDIO_BUFFER_LENGTH, 0xff);
             i2s_dma_write(&i2s_config, (const int16_t *) audio_buffer);
